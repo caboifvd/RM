@@ -1,0 +1,643 @@
+---
+title: "qtrr"
+author: "Nguyen Thi Tra"
+date: "2025-04-25"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Gọi thư viện
+library(devtools)
+library(caret)
+library(dplyr)
+library('InformationValue')
+library('ROSE')
+library(Information)
+library(scorecard)
+library(ROCR)
+library(tidyverse)
+library(magrittr)
+library(readxl)
+library(ggplot2)
+library(GGally)
+library(gridExtra)  # để xếp nhiều plot lại với nhau nếu cần
+```
+
+# I. Đọc dữ liệu
+```{r}
+credit <- read_excel("default of credit card clients.xls")
+str(credit)
+credit <- credit %>% rename(default = `default payment next month`)
+```
+# Lấy 1/2 dữ liệu để làm bài
+```{r}
+# Tạo chỉ số lấy mẫu theo stratified sampling
+set.seed(123)  # để tái lập kết quả
+index <- createDataPartition(credit$default, p = 0.5, list = FALSE)
+
+# Tạo tập dữ liệu nhỏ hơn (~50% dữ liệu gốc) với tỷ lệ default giữ nguyên
+credit <- credit[index, ]
+
+# Kiểm tra
+str(credit)
+prop.table(table(credit$default))
+```
+
+```{r}
+# Dữ liệu tỉ lệ từ kết quả của prop.table()
+proportions <- c(0.7769333, 0.2230667  )
+names(proportions) <- c("Not Default", "Default")
+
+# Vẽ biểu đồ cột
+barplot(proportions,
+        main = "Proportion of Customer Default",
+        ylab = "Proportion",
+        xlab = "Status",
+        col = c("lightblue", "salmon"), # Chọn màu cho các cột
+        ylim = c(0, 1) # Đảm bảo trục y hiển thị từ 0 đến 1
+)
+
+# Thêm nhãn giá trị trên các cột
+text(x = barplot(proportions, plot = FALSE), # Lấy vị trí x của các cột
+     y = proportions + 0.02, # Điều chỉnh vị trí y cho nhãn
+     labels = paste0(round(proportions * 100, 2), "%")) # Định dạng nhãn là phần trăm
+```
+
+# II. Xử lý dữ liệu
+```{r}
+# Function for detecting NA observations: 
+na_rate <- function(x) {x %>% is.na() %>% sum() / length(x)}
+sapply(credit, na_rate) %>% round(2)
+```
+```{r}
+credit <- subset(credit, select = -ID)
+```
+
+
+```{r}
+# Education
+unique(credit$EDUCATION)
+
+# Tạo điều kiện lọc cho các giá trị không hợp lệ (0, 5, 6)
+fil <- credit$EDUCATION %in% c(0, 5, 6)
+
+# Gán lại thành 4 cho các giá trị này
+credit$EDUCATION[fil] <- 4
+
+# Kiểm tra lại kết quả
+table(credit$EDUCATION)
+```
+```{r}
+# Marriage
+# Đếm giá trị trong cột MARRIAGE
+table(credit$MARRIAGE)
+
+# Thay các giá trị MARRIAGE == 0 thành 3 ("Other")
+credit$MARRIAGE[credit$MARRIAGE == 0] <- 3
+
+# Kiểm tra lại
+table(credit$MARRIAGE)
+```
+```{r}
+# Pay
+
+# Đổi tên cột PAY_0 thành PAY_1
+names(credit)[names(credit) == "PAY_0"] <- "PAY_1"
+```
+
+```{r}
+# Chuẩn hóa các giá trị PAY từ -2, -1 → 0
+for (i in 1:6) {
+  pay_col <- paste0("PAY_", i)
+  credit[[pay_col]][credit[[pay_col]] %in% c(-2, -1)] <- 0
+}
+
+# Kiểm tra xem có data bị gán sai hay không
+sum(credit$PAY_1 == 0 & credit$PAY_2 == 0 & credit$PAY_3 == 0 &
+    credit$PAY_4 == 0 & credit$PAY_5 == 0 & credit$PAY_6 == 0 &
+    credit$default == 1)
+
+# Sửa nhãn default nếu không nợ tháng nào nhưng bị gán sai
+credit$default[
+  credit$PAY_1 == 0 & credit$PAY_2 == 0 & credit$PAY_3 == 0 &
+  credit$PAY_4 == 0 & credit$PAY_5 == 0 & credit$PAY_6 == 0 &
+  credit$default == 1
+] <- 0
+
+# Sửa nhãn default nếu nợ cả 6 tháng nhưng bị gán sai
+credit$default[
+  credit$PAY_1 > 0 & credit$PAY_2 > 0 & credit$PAY_3 > 0 &
+  credit$PAY_4 > 0 & credit$PAY_5 > 0 & credit$PAY_6 > 0 &
+  credit$default == 0
+] <- 1
+
+# Các giá trị âm trong BILL_AMT → thay thành 0
+for (i in 1:6) {
+  bill_col <- paste0("BILL_AMT", i)
+  credit[[bill_col]][credit[[bill_col]] < 0] <- 0
+}
+```
+```{r}
+# Cập nhật các cột BILL_AMT1 đến BILL_AMT6 nếu giá trị nhỏ hơn 0
+credit$BILL_AMT1[credit$BILL_AMT1 < 0] <- 0
+credit$BILL_AMT2[credit$BILL_AMT2 < 0] <- 0
+credit$BILL_AMT3[credit$BILL_AMT3 < 0] <- 0
+credit$BILL_AMT4[credit$BILL_AMT4 < 0] <- 0
+credit$BILL_AMT5[credit$BILL_AMT5 < 0] <- 0
+credit$BILL_AMT6[credit$BILL_AMT6 < 0] <- 0
+```
+
+```{r}
+# Change class into factor
+credit$SEX<-as.factor(credit$SEX)
+credit$EDUCATION<-as.factor(credit$EDUCATION)
+credit$MARRIAGE<-as.factor(credit$MARRIAGE)
+credit$PAY_1 <- as.factor(credit$PAY_1)
+credit$PAY_2 <- as.factor(credit$PAY_2)
+credit$PAY_3 <- as.factor(credit$PAY_3)
+credit$PAY_4 <- as.factor(credit$PAY_4)
+credit$PAY_5 <- as.factor(credit$PAY_5)
+credit$PAY_6 <- as.factor(credit$PAY_6)
+```
+
+```{r}
+# Thống kê mô tả
+summary(credit)
+```
+```{r}
+# Function to remove outliers based on IQR
+remove_outliers <- function(x, lower_quantile = 0.25, upper_quantile = 0.75, factor = 1.5) {
+  iqr <- IQR(x)
+  LL <- quantile(x, lower_quantile) - factor * iqr
+  UL <- quantile(x, upper_quantile) + factor * iqr
+  keep <- x >= LL & x <= UL  # chỉ giữ lại giá trị nằm trong khoảng
+  return(keep)
+}
+# Apply for multiple columns
+
+# Tạo một logical vector giữ lại dòng hợp lệ cho từng biến
+keep_rows <- remove_outliers(credit$LIMIT_BAL) &
+             remove_outliers(credit$AGE) &
+             remove_outliers(credit$BILL_AMT1) &
+             remove_outliers(credit$BILL_AMT2) &
+             remove_outliers(credit$BILL_AMT3) &
+             remove_outliers(credit$BILL_AMT4) &
+             remove_outliers(credit$BILL_AMT5) &
+             remove_outliers(credit$BILL_AMT6) &
+             remove_outliers(credit$PAY_AMT1) &
+             remove_outliers(credit$PAY_AMT2) &
+             remove_outliers(credit$PAY_AMT3) &
+             remove_outliers(credit$PAY_AMT4) &
+             remove_outliers(credit$PAY_AMT5) &
+             remove_outliers(credit$PAY_AMT6)
+
+# Giữ lại những dòng hợp lệ
+credit <- credit[keep_rows, ]
+str(credit)
+prop.table(table(credit$default))
+table(train.data$default)
+```
+
+
+```{r}
+# Select only numeric columns
+numeric_vars <- credit[, sapply(credit, is.numeric)]
+numeric_vars <- numeric_vars[, !colnames(numeric_vars) %in% "default"]
+
+# Calculate the correlation matrix
+cor_matrix <- cor(numeric_vars, method = "pearson")
+
+# Visualize the correlation matrix with ggcorr
+ggcorr(cor_matrix) + ggtitle("Correlation Steps")
+```
+
+```{r}
+# Visualization
+# Chia biến ra
+numerical <- c('LIMIT_BAL', 'AGE', 
+               'BILL_AMT1', 'BILL_AMT2', 'BILL_AMT3', 
+               'BILL_AMT4', 'BILL_AMT5', 'BILL_AMT6',
+               'PAY_AMT1', 'PAY_AMT2', 'PAY_AMT3', 'PAY_AMT4', 'PAY_AMT5', 'PAY_AMT6')
+
+categorical <- c('SEX', 'EDUCATION', 'MARRIAGE', 
+                 'PAY_1', 'PAY_2', 'PAY_3', 'PAY_4', 'PAY_5', 'PAY_6')
+
+# --- Vẽ cho biến liên tục ---
+for (var in numerical) {
+  p <- ggplot(credit, aes_string(x = var, color = "factor(default)", fill = "factor(default)")) +
+    geom_density(alpha = 0.3) +
+    labs(title = paste("Density Plot của", var, "theo Default"), 
+         x = var, 
+         y = "Mật độ", 
+         fill = "Default", 
+         color = "Default") +
+    scale_fill_manual(values = c("0" = "#00AFBB", "1" = "#FC4E07")) +
+    scale_color_manual(values = c("0" = "#00AFBB", "1" = "#FC4E07")) +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  print(p)
+}
+
+# --- Vẽ cho biến phân loại ---
+for (var in categorical) {
+  p <- ggplot(credit, aes_string(x = var, fill = "factor(default)")) +
+    geom_bar(position = "fill") +
+    labs(title = paste("Tỉ lệ Default theo", var),
+         x = var, 
+         y = "Tỉ lệ (%)",
+         fill = "Default") +
+    scale_fill_manual(values = c("0" = "#00AFBB", "1" = "#FC4E07")) +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    scale_y_continuous(labels = scales::percent)
+  
+  print(p)
+}
+```
+
+```{r}
+IV <- Information::create_infotables(data = credit, y = "default", parallel = FALSE)
+print(IV$Summary)
+```
+```{r}
+# select vars of IV < 0.02
+vars_removed <- IV$Summary %>% as.data.frame %>% 
+                                    subset(IV < 0.02) %>% pull(1)
+vars_removed
+```
+```{r}
+# Dữ liệu sau khi lọc
+credit<- credit %>% dplyr::select(-all_of(vars_removed))
+head(credit)
+```
+```{r}
+# Chia dữ liệu 70:30
+ind <- sample(2, nrow(credit), replace = TRUE, prob = c(0.7, 0.3))
+train.data <- credit [ind == 1, ]
+test.data<- credit [ind == 2, ]
+```
+
+
+```{r}
+bins <- woebin(train.data, y = "default")
+```
+```{r}
+woebin_plot(bins)
+```
+
+# II. LOGIT
+```{r}
+train.data_woe <- woebin_ply(train.data, bins)
+```
+```{r}
+logit.model <- glm(default ~., family = binomial(link = 'logit'), data = train.data_woe)
+summary(logit.model)
+```
+```{r}
+# Lọc biến theo stepwise
+logit.step <- step(logit.model, direction = "backward", trace = 0)
+summary(logit.step)
+```
+```{r}
+# Validate
+train.prob <- predict(logit.step, type = "response")
+train.pred <- ifelse(train.prob > .5, "1", "0")
+table.train<-table(train.pred, train.data$default)
+table.train
+```
+
+```{r}
+confusionMatrix.train<-prop.table(table.train)
+confusionMatrix.train
+```
+```{r}
+# Tập test
+test.data_woe <- woebin_ply(test.data, bins)
+```
+```{r}
+head(test.data_woe)
+```
+
+```{r}
+test.pred.prob <- predict(logit.step, test.data_woe, type = 'response')
+test.pred<- as.factor(ifelse(test.pred.prob > 0.5, 1, 0))
+table.test<-table(test.pred, test.data$default)
+table.test
+```
+```{r}
+confusionMatrix.test<-prop.table(table.test)
+confusionMatrix.test
+```
+```{r}
+sensitivity <- table.test["1", "1"] / (table.test["1", "1"] + table.test["0", "1"])
+sensitivity
+```
+```{r}
+specificity<-table.test["0", "0"] / (table.test["0", "0"] + table.test["1", "0"])
+specificity
+```
+```{r}
+misClassError(test.pred, test.data$default, threshold=0.5)
+```
+
+```{r}
+# Logistic Regression ROC curve
+roc.pred <- prediction(predictions = test.pred.prob, labels = test.data$default)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+# Tính chỉ số AUROC
+AUROC_value <- roc.perf@y.values[[1]]
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+plot(roc.perf, main = "ROC Curve for credit risk Prediction Approaches", col = 2, lwd = 2)
+abline(a = 0, b = 1, lwd = 3, lty = 2, col = 1)
+```
+
+```{r}
+auc
+```
+```{r}
+# Tính chỉ số AUROC và GINI
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+auc
+```
+
+```{r}
+gini <- 2*auc - 1
+gini
+```
+```{r}
+# Calculate scorecard scores for variables based on the results from woebin and glm: 
+my_card <- scorecard(bins, logit.model, points0 = 600, odds0 = 1/19, pdo = 50)
+head(my_card)
+```
+
+```{r}
+# Calculate scorecard scores
+z_score<-log(train.prob/(1-train.prob))
+head(z_score,10)
+```
+```{r}
+credit_score <-100+2*z_score
+hist(credit_score)
+```
+```{r}
+head(credit_score,10)
+```
+# 2.1 Logit full model
+
+```{r}
+full.glm <- glm(default ~ ., family=binomial, data = train.data)
+alias(full.glm)
+full.glm.summary <- summary(full.glm)
+full.glm.summary
+```
+# logit null model
+```{r}
+null.glm = glm(default ~ 1, family=binomial, data=train.data)
+null.glm.summary <- summary(null.glm)
+null.glm.summary
+```
+
+# chọn biến stepwise aic
+
+```{r}
+model_stepwise_AIC <- step(null.glm, scope = list(lower= null.glm, upper= full.glm), direction = "both", k = 2)
+```
+```{r}
+model_stepwise_AIC.glm <- glm(default ~ PAY_1 + PAY_6 + PAY_3 + PAY_4 + EDUCATION + LIMIT_BAL + 
+    PAY_AMT4 + PAY_AMT3 + PAY_2 + BILL_AMT1 + BILL_AMT6, family=binomial, data=train.data)
+
+model_stepwise_AIC.glm_summary<-summary(model_stepwise_AIC.glm)
+
+model_stepwise_AIC.glm_summary
+
+```
+```{r}
+# Dự đoán xác suất trên tập train
+train.prob <- predict(model_stepwise_AIC.glm, type = "response")
+
+# Dự đoán nhãn 0/1
+train.pred <- ifelse(train.prob > 0.5, 1, 0)
+
+# Confusion Matrix cho train
+table.train <- table(train.pred, train.data$default)
+table.train
+
+# Tỷ lệ (proportion) trong Confusion Matrix
+confusionMatrix.train <- prop.table(table.train)
+confusionMatrix.train
+```
+```{r}
+# Dự đoán xác suất trên tập test
+test.prob <- predict(model_stepwise_AIC.glm, test.data, type = "response")
+
+# Dự đoán nhãn 0/1
+test.pred <- as.factor(ifelse(test.prob > 0.5, 1, 0))
+
+# Confusion Matrix cho test
+table.test <- table(test.pred, test.data$default)
+table.test
+
+# Tỷ lệ (proportion) trong Confusion Matrix
+confusionMatrix.test <- prop.table(table.test)
+confusionMatrix.test
+
+# Tính sensitivity, specificity
+sensitivity <- table.test["1", "1"] / (table.test["1", "1"] + table.test["0", "1"])
+sensitivity
+specificity<-table.test["0", "0"] / (table.test["0", "0"] + table.test["1", "0"])
+specificity
+
+# Tính misclassification error
+misClassError_test <- mean(test.pred != test.data$default)
+misClassError_test
+```
+```{r}
+# Ép kiểu test.prob thành numeric vector
+test.prob <- as.numeric(test.prob)
+
+# Ép kiểu test.data$default thành factor 0/1
+test.label <- as.factor(as.numeric(as.character(test.data$default)))
+# Tính ROC
+roc.pred <- prediction(predictions = test.prob, labels = test.data$default)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+
+# Vẽ ROC Curve
+plot(roc.perf, main = "ROC Curve for Credit Default Prediction", col = "blue", lwd = 2)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# Tính AUC
+auc <- performance(roc.pred, measure = "auc")
+auc_value <- as.numeric(auc@y.values)
+auc_value
+
+# Tính GINI
+gini <- 2 * auc_value - 1
+gini
+```
+
+# chọn biến bằng stepwise bic
+```{r}
+model_stepwise_BIC <- step(null.glm, scope = list(lower= null.glm, upper= full.glm), direction = "both", k = log(nrow(train.data)))
+```
+```{r}
+model_stepwise_BIC.glm <- glm(default ~ PAY_1 + PAY_6 + PAY_3 + PAY_AMT3 + PAY_AMT4 + LIMIT_BAL
+, family=binomial, data=train.data)
+BIC(model_stepwise_BIC.glm)
+
+model_stepwise_BIC.glm_summary<-summary(model_stepwise_BIC.glm)
+
+model_stepwise_BIC.glm_summary
+
+```
+```{r}
+# Dự đoán xác suất trên tập train
+train.prob <- predict(model_stepwise_BIC.glm, type = "response")
+
+# Dự đoán nhãn 0/1
+train.pred <- ifelse(train.prob > 0.5, 1, 0)
+
+# Confusion Matrix cho train
+table.train <- table(train.pred, train.data$default)
+table.train
+
+# Tỷ lệ (proportion) trong Confusion Matrix
+confusionMatrix.train <- prop.table(table.train)
+confusionMatrix.train
+```
+```{r}
+# Nếu bạn có dùng biến WOE thì cần apply lại: (bỏ bước này nếu không dùng WOE)
+# test.data_woe <- woebin_ply(test.data, bins)
+
+# Dự đoán xác suất trên tập test
+test.prob <- predict(model_stepwise_BIC.glm, test.data, type = "response")
+
+# Dự đoán nhãn 0/1
+test.pred <- ifelse(test.prob > 0.5, 1, 0)
+
+# Confusion Matrix cho test
+table.test <- table(test.pred, test.data$default)
+table.test
+
+# Tỷ lệ (proportion) trong Confusion Matrix
+confusionMatrix.test <- prop.table(table.test)
+confusionMatrix.test
+
+# Tính sensitivity, specificity
+sensitivity <- table.test["1", "1"] / (table.test["1", "1"] + table.test["0", "1"])
+sensitivity
+specificity<-table.test["0", "0"] / (table.test["0", "0"] + table.test["1", "0"])
+specificity
+
+# Tính misclassification error
+misClassError_test <- mean(test.pred != test.data$default)
+misClassError_test
+
+```
+```{r}
+# Tính ROC
+roc.pred <- prediction(predictions = test.prob, labels = test.data$default)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+
+# Vẽ ROC Curve
+plot(roc.perf, main = "ROC Curve for Credit Default Prediction", col = "blue", lwd = 2)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# Tính AUC
+auc <- performance(roc.pred, measure = "auc")
+auc_value <- as.numeric(auc@y.values)
+auc_value
+
+# Tính GINI
+gini <- 2 * auc_value - 1
+gini
+
+```
+
+
+# III. KNN
+```{r}
+.rs.restartR()
+train.data$default = as.factor(train.data$default)
+test.data$default = as.factor(test.data$default)
+knn_fit = train(
+  default ~ .,
+  data = train.data,
+  trControl = trainControl(method = "cv", number = 10),
+  method = "knn",
+  tuneLength = 9
+)
+print(knn_fit,digits=3)
+```
+```{r}
+library(pROC)
+roc_curve <- roc(test.data$default, test.data$probrf)
+roc_curve
+```
+
+```{r}
+test.data$probk=predict(knn_fit,newdata=test.data,type="prob")[,"1"]
+test.data$predk=ifelse(test.data$probk>0.5,1,0)
+# Tính confusion matrix
+ck<-table(test.data$predk, test.data$default)
+ck
+confusionMatrixknn<-prop.table(table(test.data$predk, test.data$default))
+confusionMatrixknn
+# sensitivity = TP / (TP + FN)
+sensitivity <- ck["1", "1"] / (ck["1", "1"] + ck["0", "1"])
+sensitivity
+# specificity = TN / (TN + FP)
+specificity <- ck["0", "0"] / (ck["0", "0"] + ck["1", "0"])
+specificity
+predkk=prediction(test.data$probk,test.data$default)
+auc=as.numeric(performance(predkk,"auc")@y.values)
+auc
+gini=2*auc-1
+gini
+pref=performance(predkk,"tpr","fpr")
+plot(pref)
+
+#####choose the right threshold
+plot(pref, colorize = TRUE, print.cutoffs.at = seq(0, 1, 0.06), text.adj = c(-0.2, 1.7), main = "ROC for Threshold")
+```
+
+```{r}
+#Random Forest
+library(parallel)
+rf <- train(default ~ .,
+            data = train.data,
+            method = "rf",
+            trControl = trainControl(method = "cv", number = 10, allowParallel = TRUE),
+            family = binomial)
+rf
+
+```
+```{r}
+test.data$probrf=predict(rf,newdata=test.data,type="prob")[,"1"]
+test.data$predrf=ifelse(test.data$probrf>0.5,1,0)
+test.data$predrf=as.factor(test.data$predrf)
+crf<-table(test.data$predrf, test.data$default)
+crf
+confusionMatrixrf<-prop.table(table(test.data$predrf, test.data$default))
+confusionMatrixrf
+sensitivity <- crf["1", "1"] / (crf["1", "1"] + crf["0", "1"])
+sensitivity
+# specificity = TN / (TN + FP)
+specificity <- crf["0", "0"] / (crf["0", "0"] + crf["1", "0"])
+specificity
+predrf=prediction(test.data$probrf,test.data$default)
+auc=as.numeric(performance(predrf,"auc")@y.values)
+auc
+gini=2*auc-1
+gini
+pref=performance(predrf,"tpr","fpr")
+plot(pref)
+
+#####choose the right threshold
+plot(pref,colorize=TRUE,print.cutoffs.at=seq(0,1,0.06),text.adj=c(-0.2,1.7),main="ROC for Threshold")
+```
+
