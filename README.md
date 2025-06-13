@@ -1,3 +1,5 @@
 Thẻ tín dụng ngày càng được sử dụng phổ biến nhờ vào chức năng chi tiêu vượt hạn mức, qua đó hình thành mối quan hệ tín dụng giữa khách hàng và các tổ chức tài chính. 
+
 Tuy nhiên, việc không thanh toán đúng hạn khoản nợ thẻ tín dụng có thể dẫn đến những hậu quả tiêu cực, như ảnh hưởng xấu đến hồ sơ tín dụng của khách hàng và gây thiệt hại kinh tế cho các tổ chức tài chính.
+
 Bài nghiên cứu này phân tích dữ liệu về vỡ nợ thẻ tín dụng tại Đài Loan trong giai đoạn từ tháng 4 đến tháng 9 năm 2005, với mục tiêu hỗ trợ các tổ chức tài chính nâng cao hiệu quả trong việc giám sát và quản lý rủi ro tín dụng thẻ.
